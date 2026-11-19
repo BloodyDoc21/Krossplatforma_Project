@@ -1,0 +1,17 @@
+/build*/
+/debug/
+/release/
+/Makefile*
+/.qmake.stash
+*.pro.user*
+*.user
+*.o
+moc_*
+qrc_*
+ui_*
+*.exe
+*.dll
+*.so
+*.dylib
+history.txt
+history.txt.lock
