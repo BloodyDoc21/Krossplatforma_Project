@@ -1,12 +1,16 @@
 #include "expensewindow.h"
+#include "expenselist.h"
 
 #include <QDebug>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
+
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace
@@ -31,21 +35,23 @@ public:
 ExpenseWindow::ExpenseWindow(QWidget *parent)
     : QWidget(parent),
       tracker_(new ExpenseTracker(QStringLiteral("history.txt"), this)),
-      rootLayout_(new QVBoxLayout(this))
+      rootLayout_(new QVBoxLayout(this)),
+      timer_(new QTimer(this))
 {
     setObjectName(QStringLiteral("ExpenseWindow"));
     setWindowTitle(tr("Трекер расходов"));
-    resize(560, 480);
+    resize(690, 540);
 
     setupEntryForm();
 
-    list_ = new TrackedWidget<QListWidget>(QStringLiteral("expenses"), this);
+    list_ = new ExpenseList(this);
     rootLayout_->addWidget(list_, 1);
     setupSummaryPanel();
 
     status_ = new TrackedWidget<QLabel>(QStringLiteral("status"), this);
     status_->setWordWrap(true);
     rootLayout_->addWidget(status_);
+    setupReview();
 
     connect(tracker_, &ExpenseTracker::expenseAdded, this, &ExpenseWindow::refreshExpenses);
     connect(tracker_, &ExpenseTracker::expenseAdded, this, [this](const Expense &expense) {
@@ -122,9 +128,11 @@ void ExpenseWindow::submitExpense()
 
 void ExpenseWindow::refreshExpenses()
 {
+    const int previous = list_->currentRow();
     list_->clear();
     for (const auto &expense : tracker_->expenses())
         list_->addItem(tr("%1 — %2").arg(expense.title, formatAmount(expense.kopecks)));
+    list_->selectExpense(previous);
     if (totalLabel_)
         totalLabel_->setText(tr("Итого: %1").arg(formatAmount(tracker_->total())));
     if (countLabel_)
@@ -171,4 +179,181 @@ void ExpenseWindow::demonstrateDetach()
     qDebug() << "[DEMO] children after detach:" << owner->children().size();
     owner->deleteLater();
     detached->deleteLater();
+}
+
+void ExpenseWindow::setupReview()
+{
+    auto *timerRow = new QHBoxLayout;
+    const auto addButton = [this, timerRow](const QString &name, const QString &text) {
+        auto *button = new TrackedWidget<QPushButton>(name, this);
+        button->setText(text);
+        timerRow->addWidget(button);
+        return button;
+    };
+
+    timerButton_ = addButton(QStringLiteral("toggleTimer"), tr("Старт"));
+    auto *slower = addButton(QStringLiteral("slower"), tr("Медленнее"));
+    auto *faster = addButton(QStringLiteral("faster"), tr("Быстрее"));
+    auto *mode = addButton(QStringLiteral("cycleMode"), tr("Режим"));
+    intervalLabel_ = new TrackedWidget<QLabel>(QStringLiteral("timerInterval"), this);
+    modeLabel_ = new TrackedWidget<QLabel>(QStringLiteral("timerMode"), this);
+    timerRow->addWidget(intervalLabel_);
+    timerRow->addWidget(modeLabel_);
+    timerRow->addStretch();
+    rootLayout_->addLayout(timerRow);
+
+    auto *shortcutControls = new QHBoxLayout;
+    auto *addShortcut = new QPushButton(tr("+ Быстрый выбор"), this);
+    addShortcut->setObjectName(QStringLiteral("addShortcut"));
+    auto *clear = new QPushButton(tr("Очистить кнопки"), this);
+    clear->setObjectName(QStringLiteral("clearShortcuts"));
+    auto *route = new QPushButton(tr("Сменить обработчик выбора"), this);
+    route->setObjectName(QStringLiteral("switchSelectionHandler"));
+    shortcutControls->addWidget(addShortcut);
+    shortcutControls->addWidget(clear);
+    shortcutControls->addWidget(route);
+    shortcutControls->addStretch();
+    rootLayout_->addLayout(shortcutControls);
+
+    auto *scroll = new QScrollArea(this);
+    auto *bar = new QWidget(scroll);
+    bar->setObjectName(QStringLiteral("shortcutBar"));
+    shortcutsLayout_ = new QHBoxLayout(bar);
+    shortcutsLayout_->setContentsMargins(0, 0, 0, 0);
+    shortcutsLayout_->addStretch();
+    scroll->setWidget(bar);
+    scroll->setWidgetResizable(true);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setFixedHeight(addShortcut->sizeHint().height()
+                           + 2 * scroll->frameWidth()
+                           + scroll->horizontalScrollBar()->sizeHint().height());
+    rootLayout_->addWidget(scroll);
+
+    timer_->setInterval(600);
+    connect(timerButton_, &QPushButton::clicked, this, [this] {
+        if (timer_->isActive()) {
+            timer_->stop();
+            list_->restoreHighlight();
+        } else {
+            timer_->start();
+        }
+        timerButton_->setText(timer_->isActive() ? tr("Стоп") : tr("Старт"));
+        qDebug() << "[TIMER] active:" << timer_->isActive();
+    });
+    const auto changeInterval = [this](int step) {
+        timer_->setInterval(qBound(200, timer_->interval() + step, 5000));
+        updateIntervalLabel();
+        qDebug() << "[TIMER] interval:" << timer_->interval();
+    };
+    connect(slower, &QPushButton::clicked, this, [changeInterval] { changeInterval(200); });
+    connect(faster, &QPushButton::clicked, this, [changeInterval] { changeInterval(-200); });
+    connect(mode, &QPushButton::clicked, this, &ExpenseWindow::cycleReviewMode);
+    connect(addShortcut, &QPushButton::clicked, this, &ExpenseWindow::addShortcut);
+    connect(clear, &QPushButton::clicked, this, &ExpenseWindow::clearShortcuts);
+    connect(route, &QPushButton::clicked, this, [this] {
+        selectionInTitle_ = !selectionInTitle_;
+        connectSelectionHandler();
+    });
+
+    updateIntervalLabel();
+    connectTimerHandler();
+    connectSelectionHandler();
+}
+
+void ExpenseWindow::updateIntervalLabel()
+{
+    intervalLabel_->setText(tr("%1 мс").arg(timer_->interval()));
+}
+
+void ExpenseWindow::cycleReviewMode()
+{
+    list_->restoreHighlight();
+    switch (reviewMode_) {
+    case ReviewMode::Cycle: reviewMode_ = ReviewMode::Random; break;
+    case ReviewMode::Random: reviewMode_ = ReviewMode::Blink; break;
+    case ReviewMode::Blink: reviewMode_ = ReviewMode::Cycle; break;
+    }
+    connectTimerHandler();
+}
+
+void ExpenseWindow::connectTimerHandler()
+{
+    // У таймера один активный обработчик, даже при смене режима на ходу.
+    disconnect(timerConnection_);
+    const auto connectMode = [this](const QString &name, auto action) {
+        modeLabel_->setText(name);
+        qDebug() << "[TIMER] mode:" << name;
+        return connect(timer_, &QTimer::timeout, this, [this, name, action] {
+            (list_->*action)();
+            qDebug() << "[TIMER] timeout:" << name << "row:" << list_->currentRow();
+        });
+    };
+
+    switch (reviewMode_) {
+    case ReviewMode::Cycle:
+        timerConnection_ = connectMode(tr("Цикл"), &ExpenseList::nextExpense);
+        break;
+    case ReviewMode::Random:
+        timerConnection_ = connectMode(tr("Случайно"), &ExpenseList::randomExpense);
+        break;
+    case ReviewMode::Blink:
+        timerConnection_ = connectMode(tr("Мигание"), &ExpenseList::blinkHighlight);
+        break;
+    }
+}
+
+void ExpenseWindow::connectSelectionHandler()
+{
+    disconnect(selectionConnection_);
+    setWindowTitle(tr("Трекер расходов"));
+    if (selectionInTitle_) {
+        selectionConnection_ = connect(list_, &ExpenseList::expenseSelected, this,
+                                       [this](const QString &text) {
+            setWindowTitle(tr("Трекер расходов — %1").arg(text));
+        });
+        status_->setText(tr("Выбор отображается в заголовке окна."));
+    } else {
+        selectionConnection_ = connect(list_, &ExpenseList::expenseSelected, status_, &QLabel::setText);
+        status_->setText(tr("Выбор отображается в строке состояния."));
+    }
+    qDebug() << "[LIST] reconnected selection handler, title:" << selectionInTitle_;
+}
+
+void ExpenseWindow::addShortcut()
+{
+    const auto *item = list_->currentItem();
+    if (!item) {
+        status_->setText(tr("Сначала выберите расход в списке."));
+        return;
+    }
+
+    const int row = list_->currentRow();
+    auto *bar = shortcutsLayout_->parentWidget();
+    auto *button = new TrackedWidget<QPushButton>(QStringLiteral("expenseShortcut"), bar);
+    const QString text = item->text();
+    button->setText(tr("Добавлено"));
+    button->setToolTip(text);
+    shortcutsLayout_->insertWidget(shortcutsLayout_->count() - 1, button);
+    shortcuts_.append(button);
+    connect(button, &QPushButton::clicked, this, [this, row] {
+        list_->selectExpense(row);
+        qDebug() << "[DYNAMIC] shortcut clicked, row:" << row;
+    });
+    QTimer::singleShot(600, button, [button, text] {
+        button->setText(button->fontMetrics().elidedText(text, Qt::ElideRight, 220));
+    });
+    qDebug() << "[DYNAMIC] shortcut connected, row:" << row;
+}
+
+void ExpenseWindow::clearShortcuts()
+{
+    for (const auto &button : shortcuts_) {
+        if (button) {
+            button->hide();
+            shortcutsLayout_->removeWidget(button);
+            button->deleteLater();
+        }
+    }
+    shortcuts_.clear();
+    qDebug() << "[DYNAMIC] shortcuts cleared";
 }
