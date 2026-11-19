@@ -6,6 +6,9 @@
 #include <QWidget>
 
 class ExpenseList;
+class QComboBox;
+class QFormLayout;
+class QPlainTextEdit;
 class QLabel;
 class QLineEdit;
 class QHBoxLayout;
@@ -21,6 +24,9 @@ public:
     explicit ExpenseWindow(QWidget *parent = nullptr);
     ~ExpenseWindow() override;
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private slots:
     void submitExpense();
     void refreshExpenses();
@@ -33,6 +39,10 @@ private slots:
 
 private:
     void setupEntryForm();
+    void clearEntryForm();
+    void setCompactLayout(bool compact);
+    void dumpFieldPolicies();
+    void dumpFieldSizes();
     void setupSummaryPanel();
     void setupReview();
     void updateIntervalLabel();
@@ -45,6 +55,10 @@ private:
     QVBoxLayout *rootLayout_;
     QLineEdit *title_;
     QLineEdit *amount_;
+    QComboBox *category_;
+    QPlainTextEdit *note_;
+    QFormLayout *formLayout_;
+    QHBoxLayout *amountRow_;
     ExpenseList *list_;
     QLabel *status_;
     QPointer<QWidget> summary_;

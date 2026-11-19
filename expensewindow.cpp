@@ -1,11 +1,16 @@
 #include "expensewindow.h"
 #include "expenselist.h"
+#include "adaptivefield.h"
 
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 
 #include <QPushButton>
 #include <QScrollArea>
@@ -40,24 +45,24 @@ ExpenseWindow::ExpenseWindow(QWidget *parent)
 {
     setObjectName(QStringLiteral("ExpenseWindow"));
     setWindowTitle(tr("Трекер расходов"));
-    resize(690, 540);
+    resize(720, 690);
 
     setupEntryForm();
 
     list_ = new ExpenseList(this);
-    rootLayout_->addWidget(list_, 1);
+    list_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    rootLayout_->addWidget(list_);
     setupSummaryPanel();
 
     status_ = new TrackedWidget<QLabel>(QStringLiteral("status"), this);
     status_->setWordWrap(true);
+    status_->setTextFormat(Qt::PlainText);
     rootLayout_->addWidget(status_);
     setupReview();
 
     connect(tracker_, &ExpenseTracker::expenseAdded, this, &ExpenseWindow::refreshExpenses);
     connect(tracker_, &ExpenseTracker::expenseAdded, this, [this](const Expense &expense) {
-        title_->clear();
-        amount_->clear();
-        title_->setFocus();
+        clearEntryForm();
         status_->setText(tr("Записано: %1").arg(expense.title));
     });
     connect(tracker_, &ExpenseTracker::errorOccurred, status_, &QLabel::setText);
@@ -75,20 +80,134 @@ void ExpenseWindow::setupEntryForm()
 {
     auto *entry = new TrackedWidget<QGroupBox>(QStringLiteral("entry"), this);
     entry->setTitle(tr("Новый расход"));
-    auto *row = new QHBoxLayout(entry);
-    title_ = new TrackedWidget<QLineEdit>(QStringLiteral("expenseTitle"), entry);
-    title_->setPlaceholderText(tr("Название"));
-    amount_ = new TrackedWidget<QLineEdit>(QStringLiteral("expenseAmount"), entry);
-    amount_->setPlaceholderText(tr("Сумма, ₽"));
-    auto *submit = new TrackedWidget<QPushButton>(QStringLiteral("addExpense"), entry);
-    submit->setText(tr("Добавить"));
-    row->addWidget(title_);
-    row->addWidget(amount_);
-    row->addWidget(submit);
-    rootLayout_->addWidget(entry);
+    entry->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    auto *entryLayout = new QVBoxLayout(entry);
+    formLayout_ = new QFormLayout;
+    formLayout_->setContentsMargins(0, 0, 0, 0);
+    formLayout_->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    formLayout_->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+    entryLayout->addLayout(formLayout_, 1);
+
+    title_ = new AdaptiveField<QLineEdit>(QStringLiteral("expenseTitle"), entry);
+    title_->setPlaceholderText(tr("Например, обед"));
+    title_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    formLayout_->addRow(tr("&Название"), title_);
+
+    amount_ = new AdaptiveField<QLineEdit>(QStringLiteral("expenseAmount"), entry, 12, 8);
+    amount_->setPlaceholderText(tr("0,00"));
+    amount_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    amountRow_ = new QHBoxLayout;
+    amountRow_->setContentsMargins(0, 0, 0, 0);
+    amountRow_->addWidget(amount_);
+    amountRow_->addStretch(1);
+    formLayout_->addRow(tr("&Сумма, ₽"), amountRow_);
+
+    category_ = new AdaptiveField<QComboBox>(QStringLiteral("expenseCategory"), entry);
+    category_->addItem(tr("Без категории"), QString());
+    for (const auto &category : {tr("Еда"), tr("Транспорт"), tr("Покупки"), tr("Другое")})
+        category_->addItem(category, category);
+    category_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    formLayout_->addRow(tr("&Категория"), category_);
+
+    note_ = new AdaptiveField<QPlainTextEdit>(QStringLiteral("expenseNote"), entry, 28, 16, 80, 48);
+    note_->setPlaceholderText(tr("Необязательно"));
+    note_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    formLayout_->addRow(tr("&Описание"), note_);
+
+    auto *amountPolicy = new QCheckBox(tr("Растягивать сумму"), entry);
+    amountPolicy->setObjectName(QStringLiteral("expandAmount"));
+    auto *notePolicy = new QCheckBox(tr("Растягивать описание"), entry);
+    notePolicy->setObjectName(QStringLiteral("expandNote"));
+    notePolicy->setChecked(true);
+    auto *policies = new QHBoxLayout;
+    policies->setContentsMargins(0, 0, 0, 0);
+    policies->addWidget(amountPolicy);
+    policies->addWidget(notePolicy);
+    policies->addStretch();
+    entryLayout->addLayout(policies);
+
+    auto *diagnostics = new QHBoxLayout;
+    const auto addButton = [entry](QHBoxLayout *row, const QString &name, const QString &text) {
+        auto *button = new TrackedWidget<QPushButton>(name, entry);
+        button->setText(text);
+        row->addWidget(button);
+        return button;
+    };
+    auto *compact = addButton(diagnostics, QStringLiteral("compactLayout"), tr("Компактно"));
+    auto *comfortable = addButton(diagnostics, QStringLiteral("comfortableLayout"), tr("Свободно"));
+    diagnostics->addSpacing(8);
+    auto *dumpPolicies = addButton(diagnostics, QStringLiteral("dumpPolicies"), tr("Дамп политик"));
+    auto *dumpSizes = addButton(diagnostics, QStringLiteral("dumpSizes"), tr("Дамп размеров"));
+    diagnostics->addStretch();
+    entryLayout->addLayout(diagnostics);
+
+    auto *actions = new QHBoxLayout;
+    actions->addStretch();
+    auto *submit = addButton(actions, QStringLiteral("addExpense"), tr("Добавить"));
+    auto *cancel = addButton(actions, QStringLiteral("cancelExpense"), tr("Отмена"));
+    entryLayout->addLayout(actions);
+    rootLayout_->addWidget(entry, 1);
 
     connect(submit, &QPushButton::clicked, this, &ExpenseWindow::submitExpense);
+    connect(cancel, &QPushButton::clicked, this, &ExpenseWindow::clearEntryForm);
     connect(amount_, &QLineEdit::returnPressed, this, &ExpenseWindow::submitExpense);
+    connect(compact, &QPushButton::clicked, this, [this] { setCompactLayout(true); });
+    connect(comfortable, &QPushButton::clicked, this, [this] { setCompactLayout(false); });
+    connect(amountPolicy, &QCheckBox::toggled, this, [this](bool expand) {
+        amount_->setSizePolicy(expand ? QSizePolicy::Expanding : QSizePolicy::Fixed, QSizePolicy::Fixed);
+        amountRow_->setStretch(0, expand ? 1 : 0);
+        amountRow_->setStretch(1, expand ? 0 : 1);
+        dumpFieldPolicies();
+    });
+    connect(notePolicy, &QCheckBox::toggled, this, [this](bool expand) {
+        note_->setSizePolicy(QSizePolicy::Expanding, expand ? QSizePolicy::Expanding : QSizePolicy::Fixed);
+        dumpFieldPolicies();
+    });
+    connect(dumpPolicies, &QPushButton::clicked, this, &ExpenseWindow::dumpFieldPolicies);
+    connect(dumpSizes, &QPushButton::clicked, this, &ExpenseWindow::dumpFieldSizes);
+    setCompactLayout(false);
+}
+
+void ExpenseWindow::clearEntryForm()
+{
+    title_->clear();
+    amount_->clear();
+    category_->setCurrentIndex(0);
+    note_->clear();
+    title_->setFocus();
+}
+
+void ExpenseWindow::setCompactLayout(bool compact)
+{
+    const int margin = compact ? 8 : 18;
+    const int spacing = compact ? 4 : 10;
+    rootLayout_->setContentsMargins(margin, margin, margin, margin);
+    rootLayout_->setSpacing(spacing);
+    formLayout_->setSpacing(spacing);
+    qDebug() << "[MARGIN]" << rootLayout_->contentsMargins() << "spacing:" << formLayout_->spacing();
+}
+
+void ExpenseWindow::dumpFieldPolicies()
+{
+    for (const auto *field : QList<QWidget *>{title_, amount_, category_, note_}) {
+        const auto policy = field->sizePolicy();
+        qDebug() << "[POLICY]" << field->objectName() << policy.horizontalPolicy()
+                 << policy.verticalPolicy() << policy.controlType();
+    }
+}
+
+void ExpenseWindow::dumpFieldSizes()
+{
+    for (const auto *field : QList<QWidget *>{title_, amount_, category_, note_}) {
+        qDebug() << "[SIZE]" << field->objectName() << "cur:" << field->size()
+                 << "hint:" << field->sizeHint() << "minHint:" << field->minimumSizeHint();
+    }
+}
+
+void ExpenseWindow::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    qDebug() << "[RESIZE]" << objectName() << event->oldSize() << "->" << event->size();
 }
 
 void ExpenseWindow::setupSummaryPanel()
@@ -123,15 +242,23 @@ void ExpenseWindow::setupSummaryPanel()
 
 void ExpenseWindow::submitExpense()
 {
-    tracker_->addExpense(amount_->text(), title_->text());
+    tracker_->addExpense(amount_->text(), title_->text(), category_->currentData().toString(),
+                         note_->toPlainText());
 }
 
 void ExpenseWindow::refreshExpenses()
 {
     const int previous = list_->currentRow();
     list_->clear();
-    for (const auto &expense : tracker_->expenses())
-        list_->addItem(tr("%1 — %2").arg(expense.title, formatAmount(expense.kopecks)));
+    for (const auto &expense : tracker_->expenses()) {
+        QString text = tr("%1 — %2").arg(expense.title, formatAmount(expense.kopecks));
+        if (!expense.category.isEmpty())
+            text += tr(" · %1").arg(expense.category);
+        auto *item = new QListWidgetItem(text, list_);
+        if (!expense.note.isEmpty())
+            item->setToolTip(QStringLiteral("<qt>%1</qt>").arg(
+                expense.note.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"))));
+    }
     list_->selectExpense(previous);
     if (totalLabel_)
         totalLabel_->setText(tr("Итого: %1").arg(formatAmount(tracker_->total())));
